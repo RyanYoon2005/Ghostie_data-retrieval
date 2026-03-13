@@ -2,41 +2,45 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from datetime import datetime
 import json
-import os
 import hashlib
-import glob
+import os
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
+from botocore.exceptions import ClientError
+from dotenv import load_dotenv
 
-# ── Local storage paths ───────────────────────────────────────────────────────
-# These point to the same folder that Data Collection saves into.
-# When DynamoDB is ready, swap these file reads for boto3 DynamoDB queries.
-COLLECTED_DATA_DIR = "../Ghostie_data-collection/collected_data"  # path to data collection output
-HASH_STORE_FILE    = "hash_store.json"   # tracks latest hash per business
+load_dotenv()
+
+# ── DynamoDB setup ─────────────────────────────────────────────────────────────
+
+dynamodb = boto3.resource(
+    "dynamodb",
+    region_name=os.getenv("AWS_REGION", "us-east-1"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
+)
+
+hash_keys_table    = dynamodb.Table("hash_keys")     # PK: business_key (String)
+scraped_data_table = dynamodb.Table("scraped_data")  # PK: hash_key     (String)
 
 app = FastAPI(
     title="Ghostie Data Retrieval API",
     description="Retrieves collected data for a business and uses hashing to detect if data has changed since last retrieval.",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 
-# ── Hash store helpers ────────────────────────────────────────────────────────
-# The hash store is a simple JSON file that maps a business key to its latest hash.
-# Format: { "subway_sydney_restaurant": { "hash_key": "abc123...", "updated_at": "..." } }
-# TODO: replace with DynamoDB hash_keys table when Do In Kim sets up the DB.
+class StoreRequest(BaseModel):
+    business_name: str
+    location: str
+    category: str
+    collected_at: str
+    news_count: int = 0
+    review_count: int = 0
+    data: list
 
-def load_hash_store() -> dict:
-    """Load the hash store from disk."""
-    if not os.path.exists(HASH_STORE_FILE):
-        return {}
-    with open(HASH_STORE_FILE, "r") as f:
-        return json.load(f)
-
-
-def save_hash_store(store: dict):
-    """Save the hash store to disk."""
-    with open(HASH_STORE_FILE, "w") as f:
-        json.dump(store, f, indent=2)
-
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def make_business_key(business_name: str, location: str, category: str) -> str:
     """Create a consistent lookup key for a business."""
@@ -44,57 +48,146 @@ def make_business_key(business_name: str, location: str, category: str) -> str:
 
 
 def compute_hash(data: list) -> str:
-    """
-    Generate a SHA-256 hash fingerprint of the data.
-    If the data hasn't changed since last time, the hash will be identical.
-    """
+    """Generate a SHA-256 hash fingerprint of the data."""
     data_string = json.dumps(data, sort_keys=True)
     return hashlib.sha256(data_string.encode()).hexdigest()
 
 
-# ── Data loader ───────────────────────────────────────────────────────────────
+# ── DynamoDB: hash_keys table ──────────────────────────────────────────────────
 
-def load_latest_data(business_name: str, location: str, category: str) -> dict | None:
+def get_stored_hash_entry(business_key: str) -> dict | None:
+    """Fetch the stored hash entry for a business from DynamoDB."""
+    try:
+        response = hash_keys_table.get_item(Key={"business_key": business_key})
+        return response.get("Item")
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"DynamoDB error (hash_keys): {e.response['Error']['Message']}")
+
+
+def save_hash_entry(business_key: str, hash_key: str, business_name: str, location: str, category: str):
+    """Write or update the hash entry for a business in DynamoDB."""
+    try:
+        hash_keys_table.put_item(Item={
+            "business_key":  business_key,
+            "hash_key":      hash_key,
+            "updated_at":    datetime.utcnow().isoformat(),
+            "business_name": business_name,
+            "location":      location,
+            "category":      category,
+        })
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"DynamoDB error (hash_keys put): {e.response['Error']['Message']}")
+
+
+# ── DynamoDB: scraped_data table ───────────────────────────────────────────────
+
+def get_scraped_data_by_hash(hash_key: str) -> dict | None:
+    """Fetch a specific dataset by its hash key."""
+    try:
+        response = scraped_data_table.get_item(Key={"hash_key": hash_key})
+        return response.get("Item")
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data): {e.response['Error']['Message']}")
+
+
+def get_latest_scraped_data(business_key: str) -> dict | None:
     """
-    Find the most recently saved JSON file for this business from the
-    Data Collection service output folder.
-    TODO: replace with DynamoDB scraped_data table query when DB is ready.
+    Fetch the most recent dataset for a business.
+    Scans the scraped_data table filtering by business_key, then picks the latest
+    by collected_at. (A GSI on business_key + collected_at would be more efficient
+    at scale, but a Scan is fine for this lab project.)
     """
-    safe_name     = business_name.lower().replace(" ", "_")
-    safe_location = location.lower().replace(" ", "_")
-
-    # Look for files matching this business + location
-    pattern = os.path.join(COLLECTED_DATA_DIR, f"{safe_name}_{safe_location}_*.json")
-    matches = glob.glob(pattern)
-
-    if not matches:
-        return None
-
-    # Return the most recently created file
-    latest_file = max(matches, key=os.path.getmtime)
-    with open(latest_file, "r") as f:
-        return json.load(f)
+    try:
+        response = scraped_data_table.scan(
+            FilterExpression=Attr("business_key").eq(business_key)
+        )
+        items = response.get("Items", [])
+        if not items:
+            return None
+        # Sort descending by collected_at and return the newest
+        return max(items, key=lambda x: x.get("collected_at", ""))
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data scan): {e.response['Error']['Message']}")
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
+    """Write a new dataset into the scraped_data table."""
+    try:
+        scraped_data_table.put_item(Item={
+            "hash_key":      hash_key,
+            "business_key":  business_key,
+            "business_name": payload.business_name,
+            "location":      payload.location,
+            "category":      payload.category,
+            "collected_at":  payload.collected_at,
+            "news_count":    payload.news_count,
+            "review_count":  payload.review_count,
+            "data":          payload.data,
+        })
+    except ClientError as e:
+        raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data put): {e.response['Error']['Message']}")
+
+
+# ── Routes ─────────────────────────────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {
         "service": "Ghostie Data Retrieval API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status":  "running",
         "endpoints": {
-            "GET /retrieve":             "Retrieve data for a business (with hash comparison)",
-            "GET /retrieve/{hash_key}":  "Retrieve data by a specific hash key",
-            "GET /health":               "Health check",
+            "GET  /retrieve":             "Retrieve latest data for a business (with hash comparison)",
+            "GET  /retrieve/{hash_key}":  "Retrieve a specific dataset by hash key",
+            "POST /store":                "Store new collected data (called by Data Collection service)",
+            "GET  /health":               "Health check",
         }
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+    """Health check — also verifies DynamoDB connectivity."""
+    try:
+        # Light-weight check: just describe the table status
+        status = hash_keys_table.table_status
+        return {
+            "status":    "healthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "dynamodb":  status,   # should be "ACTIVE"
+        }
+    except ClientError as e:
+        return {
+            "status":    "unhealthy",
+            "timestamp": datetime.utcnow().isoformat(),
+            "error":     e.response["Error"]["Message"],
+        }
+
+
+@app.post("/store")
+def store(payload: StoreRequest):
+    """
+    Store newly collected data into DynamoDB.
+    Called by the Data Collection service after it finishes scraping.
+
+    Body (JSON):
+        business_name, location, category, collected_at,
+        news_count, review_count, data (list)
+    """
+    if not payload.data:
+        raise HTTPException(status_code=400, detail="'data' field must be a non-empty list.")
+
+    hash_key     = compute_hash(payload.data)
+    business_key = make_business_key(payload.business_name, payload.location, payload.category)
+
+    save_scraped_data(hash_key, business_key, payload)
+
+    return {
+        "status":        "STORED",
+        "hash_key":      hash_key,
+        "business_key":  business_key,
+        "total_results": len(payload.data),
+    }
 
 
 @app.get("/retrieve")
@@ -103,42 +196,40 @@ def retrieve(business_name: str, location: str, category: str):
     Retrieve the latest collected data for a business.
 
     Compares the hash of the current data against the previously stored hash:
-    - If identical  → returns NO NEW DATA (Stefan uses cached analytical outputs)
-    - If different  → returns NEW DATA with full payload (Stefan runs fresh analysis)
+    - If identical  → returns NO NEW DATA (use cached analytical outputs)
+    - If different  → returns NEW DATA with full payload (run fresh analysis)
 
     Query params:
         business_name : e.g. "Subway"
         location      : e.g. "Sydney"
         category      : e.g. "restaurant"
     """
-
     if not business_name or not location or not category:
-        raise HTTPException(status_code=400, detail="business_name, location and category are all required")
+        raise HTTPException(status_code=400, detail="business_name, location, and category are all required.")
 
-    # Load the latest collected data for this business
-    collected = load_latest_data(business_name, location, category)
+    business_key = make_business_key(business_name, location, category)
 
+    # Get the most recent dataset for this business from scraped_data table
+    collected = get_latest_scraped_data(business_key)
     if collected is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No collected data found for '{business_name}' in '{location}'. Run POST /collect first."
+            detail=f"No collected data found for '{business_name}' in '{location}'. Run POST /store first."
         )
 
     current_data = collected.get("data", [])
     if not current_data:
-        raise HTTPException(status_code=404, detail="Collected file exists but contains no data.")
+        raise HTTPException(status_code=404, detail="Record exists in DynamoDB but contains no data.")
 
     # Compute hash fingerprint of current data
     current_hash = compute_hash(current_data)
-    business_key = make_business_key(business_name, location, category)
 
-    # Compare against stored hash
-    hash_store    = load_hash_store()
-    stored_entry  = hash_store.get(business_key)
-    stored_hash   = stored_entry.get("hash_key") if stored_entry else None
+    # Compare against the stored hash in hash_keys table
+    stored_entry = get_stored_hash_entry(business_key)
+    stored_hash  = stored_entry.get("hash_key") if stored_entry else None
 
     if stored_hash == current_hash:
-        # ── NO NEW DATA ──────────────────────────────────────────────────────
+        # ── NO NEW DATA ────────────────────────────────────────────────────────
         return {
             "status":        "NO NEW DATA",
             "hash_key":      current_hash,
@@ -149,16 +240,9 @@ def retrieve(business_name: str, location: str, category: str):
         }
 
     else:
-        # ── NEW DATA ─────────────────────────────────────────────────────────
-        # Update the hash store with the new hash
-        hash_store[business_key] = {
-            "hash_key":   current_hash,
-            "updated_at": datetime.utcnow().isoformat(),
-            "business_name": business_name,
-            "location":      location,
-            "category":      category,
-        }
-        save_hash_store(hash_store)
+        # ── NEW DATA ───────────────────────────────────────────────────────────
+        # Update the hash_keys table with the new hash
+        save_hash_entry(business_key, current_hash, business_name, location, category)
 
         return {
             "status":        "NEW DATA",
@@ -178,38 +262,29 @@ def retrieve(business_name: str, location: str, category: str):
 def retrieve_by_hash(hash_key: str):
     """
     Retrieve a specific version of data by its hash key.
-    Stefan uses this to fetch a previously seen dataset by its fingerprint.
-    TODO: when DynamoDB is ready, query the scraped_data table by hash_key field.
+    Used to fetch a previously seen dataset by its fingerprint.
     """
+    item = get_scraped_data_by_hash(hash_key)
+    if item is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data found for hash key '{hash_key}'."
+        )
 
-    # Search all collected files for one matching this hash
-    pattern = os.path.join(COLLECTED_DATA_DIR, "*.json")
-    all_files = glob.glob(pattern)
-
-    for filepath in all_files:
-        with open(filepath, "r") as f:
-            collected = json.load(f)
-
-        data = collected.get("data", [])
-        if compute_hash(data) == hash_key:
-            return {
-                "status":        "FOUND",
-                "hash_key":      hash_key,
-                "business_name": collected.get("business_name", ""),
-                "location":      collected.get("location", ""),
-                "category":      collected.get("category", ""),
-                "collected_at":  collected.get("collected_at", ""),
-                "total_results": len(data),
-                "data":          data,
-            }
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"No data found for hash key '{hash_key}'"
-    )
+    data = item.get("data", [])
+    return {
+        "status":        "FOUND",
+        "hash_key":      hash_key,
+        "business_name": item.get("business_name", ""),
+        "location":      item.get("location", ""),
+        "category":      item.get("category", ""),
+        "collected_at":  item.get("collected_at", ""),
+        "total_results": len(data),
+        "data":          data,
+    }
 
 
-# ── Run locally ───────────────────────────────────────────────────────────────
+# ── Run locally ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("DataRetrieval:app", host="0.0.0.0", port=8001, reload=True)  # note: port 8001 (not 8000)
+    uvicorn.run("DataRetrieval:app", host="0.0.0.0", port=8001, reload=True)
