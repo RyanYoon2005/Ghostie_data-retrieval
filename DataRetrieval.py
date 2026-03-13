@@ -4,6 +4,7 @@ from datetime import datetime
 import json
 import hashlib
 import os
+from decimal import Decimal
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 from botocore.exceptions import ClientError
@@ -41,6 +42,28 @@ class StoreRequest(BaseModel):
     data: list
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
+
+def floats_to_decimals(obj):
+    """Recursively convert floats to Decimal before writing to DynamoDB."""
+    if isinstance(obj, float):
+        return Decimal(str(obj))
+    if isinstance(obj, dict):
+        return {k: floats_to_decimals(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [floats_to_decimals(i) for i in obj]
+    return obj
+
+
+def decimals_to_floats(obj):
+    """Recursively convert Decimals back to float/int when reading from DynamoDB."""
+    if isinstance(obj, Decimal):
+        return int(obj) if obj % 1 == 0 else float(obj)
+    if isinstance(obj, dict):
+        return {k: decimals_to_floats(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [decimals_to_floats(i) for i in obj]
+    return obj
+
 
 def make_business_key(business_name: str, location: str, category: str) -> str:
     """Create a consistent lookup key for a business."""
@@ -85,7 +108,8 @@ def get_scraped_data_by_hash(hash_key: str) -> dict | None:
     """Fetch a specific dataset by its hash key."""
     try:
         response = scraped_data_table.get_item(Key={"hash_key": hash_key})
-        return response.get("Item")
+        item = response.get("Item")
+        return decimals_to_floats(item) if item else None
     except ClientError as e:
         raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data): {e.response['Error']['Message']}")
 
@@ -105,7 +129,8 @@ def get_latest_scraped_data(business_key: str) -> dict | None:
         if not items:
             return None
         # Sort descending by collected_at and return the newest
-        return max(items, key=lambda x: x.get("collected_at", ""))
+        latest = max(items, key=lambda x: x.get("collected_at", ""))
+        return decimals_to_floats(latest)
     except ClientError as e:
         raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data scan): {e.response['Error']['Message']}")
 
@@ -113,6 +138,8 @@ def get_latest_scraped_data(business_key: str) -> dict | None:
 def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
     """Write a new dataset into the scraped_data table."""
     try:
+        # DynamoDB rejects Python floats — convert the entire data list first
+        clean_data = floats_to_decimals(payload.data)
         scraped_data_table.put_item(Item={
             "hash_key":      hash_key,
             "business_key":  business_key,
@@ -122,7 +149,7 @@ def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
             "collected_at":  payload.collected_at,
             "news_count":    payload.news_count,
             "review_count":  payload.review_count,
-            "data":          payload.data,
+            "data":          clean_data,
         })
     except ClientError as e:
         raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data put): {e.response['Error']['Message']}")
