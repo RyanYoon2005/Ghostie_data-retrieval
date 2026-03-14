@@ -14,10 +14,19 @@ Resources:
         Variables:
           DYNAMODB_REGION: us-east-1
       Policies:
-        - DynamoDBCrudPolicy:
-            TableName: hash_keys
-        - DynamoDBCrudPolicy:
-            TableName: scraped_data
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+                - dynamodb:DeleteItem
+                - dynamodb:Query
+                - dynamodb:Scan
+                - dynamodb:DescribeTable
+              Resource:
+                - arn:aws:dynamodb:us-east-1:146558977325:table/hash_keys
+                - arn:aws:dynamodb:us-east-1:146558977325:table/scraped_data
       Events:
         ApiCatchAll:
           Type: Api
