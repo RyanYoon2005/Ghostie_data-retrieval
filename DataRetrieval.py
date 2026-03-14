@@ -40,9 +40,11 @@ app = FastAPI(
 
 @app.get("/docs", include_in_schema=False)
 async def custom_swagger_ui(req: Request):
-    root_path = req.scope.get("root_path", "").rstrip("/")
+    # Use a relative URL so the browser resolves it correctly regardless of
+    # the API Gateway stage prefix (e.g. /Prod/docs → /Prod/openapi.json).
+    # Mangum doesn't reliably populate root_path, so we avoid relying on it.
     return get_swagger_ui_html(
-        openapi_url=f"{root_path}/openapi.json",
+        openapi_url="openapi.json",
         title=app.title,
     )
 
