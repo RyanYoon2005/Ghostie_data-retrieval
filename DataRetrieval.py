@@ -275,8 +275,9 @@ def retrieve(business_name: str, location: str, category: str):
     if not current_data:
         raise HTTPException(status_code=404, detail="Record exists in DynamoDB but contains no data.")
 
-    # Compute hash fingerprint of current data
-    current_hash = compute_hash(current_data)
+    # Use the hash_key already stored in the record (avoids float→Decimal→int
+    # round-trip mismatch that would produce a different hash on recompute)
+    current_hash = collected.get("hash_key") or compute_hash(current_data)
 
     # Compare against the stored hash in hash_keys table
     stored_entry = get_stored_hash_entry(business_key)
