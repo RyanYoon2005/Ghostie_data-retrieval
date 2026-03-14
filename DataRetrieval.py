@@ -60,6 +60,7 @@ async def custom_openapi():
         version=app.version,
         description=app.description,
         routes=app.routes,
+        servers=[{"url": _root_path}] if _root_path else [{"url": "/"}]
     ))
 
 
