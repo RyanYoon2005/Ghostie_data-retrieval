@@ -22,8 +22,8 @@ jobs:
       - name: Install test dependencies
         run: pip install -r requirements-test.txt
 
-      - name: Install system dependencies for WeasyPrint
-        run: sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0
+      - name: Install wkhtmltopdf
+        run: sudo apt-get install -y wkhtmltopdf
 
       - name: Run tests and generate HTML report
         env:
@@ -34,6 +34,10 @@ jobs:
           AWS_SESSION_TOKEN: "testing"
           AWS_DEFAULT_REGION: "ap-southeast-2"
         run: pytest
+
+      - name: Convert HTML report to PDF
+        if: always()
+        run: wkhtmltopdf tests/test-report.html tests/test-report.pdf
 
       - name: Upload test report
         uses: actions/upload-artifact@v4

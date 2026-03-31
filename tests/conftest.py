@@ -11,21 +11,12 @@ are patched via monkeypatch.setattr before each test, so all route handlers use
 the mocks instead of the real AWS resource. Fixtures are scoped to 'function'
 (default) so every test starts with a clean mock state.
 """
-import os
 from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 import DataRetrieval
-
-
-def pytest_sessionfinish(session, exitstatus):
-    html_path = "tests/test-report.html"
-    pdf_path = "tests/test-report.pdf"
-    if os.path.exists(html_path):
-        from weasyprint import HTML
-        HTML(filename=html_path).write_pdf(pdf_path)
 
 
 @pytest.fixture
