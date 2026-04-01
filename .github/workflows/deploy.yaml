@@ -35,9 +35,26 @@ jobs:
           AWS_DEFAULT_REGION: "ap-southeast-2"
         run: pytest
 
+      - name: Install Playwright and Chromium
+        if: always()
+        run: |
+          playwright install chromium
+          playwright install-deps chromium
+
       - name: Convert HTML report to PDF
         if: always()
-        run: python3 -m weasyprint tests/test-report.html tests/test-report.pdf
+        run: |
+          python3 -c "
+          from playwright.sync_api import sync_playwright
+          import os
+          with sync_playwright() as p:
+              browser = p.chromium.launch()
+              page = browser.new_page()
+              page.goto('file://' + os.path.abspath('tests/test-report.html'))
+              page.wait_for_load_state('networkidle')
+              page.pdf(path='tests/test-report.pdf', format='A4', print_background=True)
+              browser.close()
+          "
 
       - name: Upload test report
         uses: actions/upload-artifact@v4
