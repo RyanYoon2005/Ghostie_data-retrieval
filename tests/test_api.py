@@ -18,10 +18,8 @@ Endpoints under test:
 """
 from unittest.mock import PropertyMock
 
-import pytest
 from botocore.exceptions import ClientError
 
-import DataRetrieval
 from DataRetrieval import compute_hash
 
 # ── Shared test data ─────────────────────────────────────────────────────────

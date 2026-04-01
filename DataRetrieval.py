@@ -9,9 +9,10 @@ import hashlib
 import os
 from decimal import Decimal
 import boto3
-from boto3.dynamodb.conditions import Key, Attr
+from boto3.dynamodb.conditions import Attr
 from botocore.exceptions import ClientError
 from dotenv import load_dotenv
+from mangum import Mangum
 
 load_dotenv()
 
@@ -25,14 +26,17 @@ dynamodb = boto3.resource(
     aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
 )
 
-hash_keys_table    = dynamodb.Table("hash_keys")     # PK: business_key (String)
-scraped_data_table = dynamodb.Table("scraped_data")  # PK: hash_key     (String)
+hash_keys_table = dynamodb.Table("hash_keys")  # PK: business_key (String)
+scraped_data_table = dynamodb.Table("scraped_data")  # PK: hash_key (String)
 
 _root_path = "/Prod" if os.environ.get("AWS_LAMBDA_FUNCTION_NAME") else ""
 
 app = FastAPI(
     title="Ghostie Data Retrieval API",
-    description="Retrieves collected data for a business and uses hashing to detect if data has changed since last retrieval.",
+    description=(
+        "Retrieves collected data for a business and uses hashing to "
+        "detect if data has changed since last retrieval."
+    ),
     version="2.0.0",
     root_path=_root_path,
     servers=[{"url": _root_path}] if _root_path else [{"url": "/"}],
@@ -72,6 +76,7 @@ class StoreRequest(BaseModel):
     news_count: int = 0
     review_count: int = 0
     data: list
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -164,7 +169,10 @@ def get_latest_scraped_data(business_key: str) -> dict | None:
         latest = max(items, key=lambda x: x.get("collected_at", ""))
         return decimals_to_floats(latest)
     except ClientError as e:
-        raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data scan): {e.response['Error']['Message']}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB error (scraped_data scan): {e.response['Error']['Message']}"
+        )
 
 
 def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
@@ -184,7 +192,10 @@ def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
             "data":          clean_data,
         })
     except ClientError as e:
-        raise HTTPException(status_code=500, detail=f"DynamoDB error (scraped_data put): {e.response['Error']['Message']}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB error (scraped_data put): {e.response['Error']['Message']}"
+        )
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────────
@@ -236,7 +247,7 @@ def store(payload: StoreRequest):
     if not payload.data:
         raise HTTPException(status_code=400, detail="'data' field must be a non-empty list.")
 
-    hash_key     = compute_hash(payload.data)
+    hash_key = compute_hash(payload.data)
     business_key = make_business_key(payload.business_name, payload.location, payload.category)
 
     save_scraped_data(hash_key, business_key, payload)
@@ -260,7 +271,10 @@ def list_companies():
             "companies": items,
         }
     except ClientError as e:
-        raise HTTPException(status_code=500, detail=f"DynamoDB error (hash_keys scan): {e.response['Error']['Message']}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB error (hash_keys scan): {e.response['Error']['Message']}"
+        )
 
 
 @app.get("/retrieve")
@@ -300,7 +314,7 @@ def retrieve(business_name: str, location: str, category: str):
 
     # Compare against the stored hash in hash_keys table
     stored_entry = get_stored_hash_entry(business_key)
-    stored_hash  = stored_entry.get("hash_key") if stored_entry else None
+    stored_hash = stored_entry.get("hash_key") if stored_entry else None
 
     if stored_hash == current_hash:
         # ── NO NEW DATA ────────────────────────────────────────────────────────
@@ -359,7 +373,6 @@ def retrieve_by_hash(hash_key: str):
 
 
 # ── Lambda handler (Mangum) ─────────────────────────────────────────────────────
-from mangum import Mangum
 handler = Mangum(app)
 
 # ── Run locally ────────────────────────────────────────────────────────────────

@@ -25,6 +25,9 @@ jobs:
       - name: Install wkhtmltopdf
         run: sudo apt-get install -y wkhtmltopdf
 
+      - name: Lint with flake8
+        run: flake8 DataRetrieval.py tests/
+
       - name: Run tests and generate HTML report
         env:
           CI: "true"
