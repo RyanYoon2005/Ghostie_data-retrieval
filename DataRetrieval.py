@@ -159,10 +159,15 @@ def get_latest_scraped_data(business_key: str) -> dict | None:
     at scale, but a Scan is fine for this lab project.)
     """
     try:
-        response = scraped_data_table.scan(
-            FilterExpression=Attr("business_key").eq(business_key)
-        )
-        items = response.get("Items", [])
+        items = []
+        scan_kwargs: dict = {"FilterExpression": Attr("business_key").eq(business_key)}
+        while True:
+            response = scraped_data_table.scan(**scan_kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
         if not items:
             return None
         # Sort descending by collected_at and return the newest
