@@ -20,7 +20,7 @@ load_dotenv()
 
 dynamodb = boto3.resource(
     "dynamodb",
-    region_name=os.getenv("DYNAMODB_REGION", "us-east-1"),
+    region_name=os.getenv("DYNAMODB_REGION", "ap-southeast-2"),
     aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
     aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
     aws_session_token=os.getenv("AWS_SESSION_TOKEN"),
@@ -252,7 +252,7 @@ def store(payload: StoreRequest):
 
     logsaved = save_scraped_data(hash_key, business_key, payload)
 
-    print(f"{logsaved}")
+    print(f"Data retreival stored: {logsaved}")
 
     return {
         "status":        "STORED",
