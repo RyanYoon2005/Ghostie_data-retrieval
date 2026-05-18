@@ -180,7 +180,7 @@ def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
     try:
         # DynamoDB rejects Python floats — convert the entire data list first
         clean_data = floats_to_decimals(payload.data)
-        scraped_data_table.put_item(Item={
+        response = scraped_data_table.put_item(Item={
             "hash_key":      hash_key,
             "business_key":  business_key,
             "business_name": payload.business_name,
@@ -191,6 +191,12 @@ def save_scraped_data(hash_key: str, business_key: str, payload: StoreRequest):
             "review_count":  payload.review_count,
             "data":          clean_data,
         })
+        status = response["ResponseMetadata"]["HTTPStatusCode"]
+        return {
+            "success": status == 200,
+            "status_code": status,
+            "hash_key": hash_key,
+        }
     except ClientError as e:
         raise HTTPException(
             status_code=500,
