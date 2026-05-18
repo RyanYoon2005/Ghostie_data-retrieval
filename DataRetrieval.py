@@ -250,7 +250,9 @@ def store(payload: StoreRequest):
     hash_key = compute_hash(payload.data)
     business_key = make_business_key(payload.business_name, payload.location, payload.category)
 
-    save_scraped_data(hash_key, business_key, payload)
+    logsaved = save_scraped_data(hash_key, business_key, payload)
+
+    print(f"{logsaved}")
 
     return {
         "status":        "STORED",
